@@ -1,0 +1,118 @@
+# =====================
+# Logs
+# =====================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# =====================
+# Node / Frontend
+# =====================
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# =====================
+# Python
+# =====================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python build / distribution
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+
+# Python tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# =====================
+# FastAPI / Uvicorn
+# =====================
+.env
+.env.*
+*.sqlite3
+
+# =====================
+# Editor / OS files
+# =====================
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Visual Studio
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# =====================
+# Misc
+# =====================
+*.bak
+*.tmp
+*.cache
+
+# Ignora los archivos dentro de audio_cache en el backend
+crud-fast-api/static/audio_cache/*
+
+!crud-fast-api/static/audio_cache/.gitkeep
+
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# local env files
+.env*.local
+
+out/
+build/
+dist/
+
+# plasmo
+.plasmo
+
+# typescript
+.tsbuildinfo
