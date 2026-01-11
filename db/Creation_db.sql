@@ -14,11 +14,9 @@ CREATE TABLE videos (
     topics TEXT[],         
     accents TEXT[],       
     content_types TEXT[],   
-
     level cefr_enum,       
     wpm INTEGER,           
     subtitle_source sub_source_enum, 
-
     -- Datos extra de la IA
     ai_analysis JSONB,
     

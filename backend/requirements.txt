@@ -4,3 +4,6 @@ sqlalchemy
 fastapi
 uvicorn
 python-dotenv
+groq
+pytubefix
+youtube-transcript-api

@@ -9,7 +9,7 @@ load_dotenv()
 password=os.getenv("POSTGRESQL_PASSWORD")
 db=os.getenv("DB_NAME")
 
-DATABASE_URL = "postgresql+asyncpg://fastapi_user:"+password+"@localhost:5432/"+db
+DATABASE_URL = "postgresql+asyncpg://postgres:"+password+"@localhost:5432/"+db
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 
