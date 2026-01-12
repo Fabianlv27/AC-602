@@ -5,5 +5,8 @@ fastapi
 uvicorn
 python-dotenv
 groq
-pytubefix
-youtube-transcript-api
+seleniumbase
+yt-dlp
+python-jose 
+passlib 
+bcrypt

@@ -1,151 +1,158 @@
-import yt_dlp
 import logging
-import requests
-import os
-import json
-from typing import Optional
-import time
-import random
+import time      # <--- ESTE es el módulo correcto para dormir (time.sleep)
+import random    # <--- Necesario para el tiempo aleatorio
+import re
+import asyncio
+from seleniumbase import SB
+import yt_dlp
 
-# Configuración de logs
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# --- CONFIGURACIÓN DE LOGS LIMPIA ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
+logger = logging.getLogger("Scraper")
+
+# Silenciar librerías ruidosas
+logging.getLogger('seleniumbase').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('websockets').setLevel(logging.WARNING)
+logging.getLogger('yt_dlp').setLevel(logging.ERROR)
 
 class VideoMetadataExtractor:
     def __init__(self):
-        # Configuración base de yt-dlp
-        self.ydl_opts = {
-            'quiet': True,           # No llenar la consola de basura
-            'skip_download': True,   # IMPORTANTE: No descargar el video, solo info
-            'writesubtitles': True,  # Queremos buscar subs
-            'writeautomaticsub': True,
-            'subtitleslangs': ['en'], # Prioridad al inglés
-            'cookiefile': 'Data/cookies.txt' if os.path.exists('Data/cookies.txt') else None
-        }
+        self.clean_regex = re.compile(r"\[.*?\]|\(.*?\)")
 
     def _calculate_wpm(self, word_count: int, duration_seconds: float) -> int:
         if duration_seconds <= 0: return 0
         minutes = duration_seconds / 60
         return int(word_count / minutes)
 
-    def _fetch_transcript_text(self, formats_list) -> str:
-        """
-        Descarga y parsea el subtítulo desde la URL que nos da yt-dlp.
-        Prefiere formato JSON3 para parseo limpio, si no, baja VTT.
-        """
-        target_url = None
-        
-        # 1. Buscar formato JSON3 (es el más fácil de procesar limpio)
-        for fmt in formats_list:
-            if fmt.get('ext') == 'json3':
-                target_url = fmt['url']
-                break
-        
-        # 2. Si no hay JSON3, intentar cualquiera (VTT/SRV1)
-        if not target_url and formats_list:
-            target_url = formats_list[0]['url']
-
-        if not target_url:
-            return ""
-
+    def _parse_duration(self, duration_str: str) -> int:
         try:
-            # Descargamos el contenido del subtítulo
-            response = requests.get(target_url)
-            response.raise_for_status()
+            parts = list(map(int, duration_str.split(':')))
+            if len(parts) == 2:
+                return parts[0] * 60 + parts[1]
+            elif len(parts) == 3:
+                return parts[0] * 3600 + parts[1] * 60 + parts[2]
+            return 0
+        except:
+            return 0
 
-            # Si es JSON3, lo procesamos bonito
-            if 'json3' in target_url or target_url.endswith('json3'):
-                data = response.json()
-                text_segments = []
-                # Navegar la estructura extraña de JSON3 de YouTube
-                events = data.get('events', [])
-                for event in events:
-                    segs = event.get('segs', [])
-                    for seg in segs:
-                        if 'utf8' in seg and seg['utf8'] != '\n':
-                            text_segments.append(seg['utf8'])
-                return " ".join(text_segments).replace("\n", " ").strip()
-            
-            else:
-                # Si es VTT/XML, respuesta cruda (limpieza básica)
-                # Esto es un fallback, normalmente siempre hay json3
-                return response.text
-
-        except Exception as e:
-            logger.error(f"Error descargando texto del subtítulo: {e}")
-            return ""
-
-    async def process_video(self, url: str):
-        """
-        Extrae metadatos y transcripción usando yt-dlp.
-        """
-        wait_time = random.uniform(15, 30) 
-        logger.info(f"⏳ Enfriando motores... Esperando {wait_time:.1f}s")
-        time.sleep(wait_time)
-        try:
-            # yt-dlp es sincrónico, pero rápido para metadatos.
-            # Lo envolvemos en un bloque try para que no tumbe el programa.
-            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                try:
-                    info = ydl.extract_info(url, download=False)
-                except Exception as e:
-                    logger.error(f"❌ Error yt-dlp extrayendo info de {url}: {e}")
-                    return None
-
-                video_id = info.get('id')
-                title = info.get('title')
-                channel_name = info.get('uploader')
-                duration = info.get('duration', 0)
-                thumbnail = info.get('thumbnail')
+    def _scrape_sync(self, url: str):
+        data = None
+        video_id = url.split("v=")[-1]
+        
+        # HEADLESS=TRUE: Invisible por defecto.
+        # Cambia a False si quieres ver el navegador trabajando.
+        with SB(uc=True, test=True, headless=True, locale_code="es") as sb:
+            try:
+                # --- PAUSA DE SEGURIDAD (ANTI-BLOQUEO) ---
+                # Esperamos entre 5 y 10 segundos antes de empezar para parecer humanos
+                wait = random.uniform(5, 10)
+                # Usamos time.sleep aquí sin miedo porque los imports están arreglados
+                time.sleep(wait)
                 
-                # --- LÓGICA DE SUBTÍTULOS ---
+                logger.info(f"▶️ Procesando: {video_id}...")
+                
+                sb.maximize_window()
+                sb.activate_cdp_mode(url)
+                
+                # --- COOKIES ---
+                sb.sleep(2)
+                cookie_selectors = [
+                    'button[aria-label="Rechazar todo"]', 'button:contains("Rechazar todo")',
+                    'button[aria-label="Aceptar todo"]', 'button:contains("Aceptar todo")',
+                    'form[action*="consent"] button'
+                ]
+                for selector in cookie_selectors:
+                    if sb.is_element_visible(selector):
+                        sb.click(selector)
+                        sb.sleep(1)
+                        break
+
+                if not sb.wait_for_element("#columns", timeout=15):
+                    logger.warning(f"⚠️ Timeout cargando video: {video_id}")
+                    return None
+                
+                # --- METADATOS ---
+                title = "Unknown"
+                try: title = sb.get_text("h1.ytd-watch-metadata")
+                except: pass
+
+                channel = "Unknown"
+                selectors = ["#owner-name a", "#upload-info a", "ytd-channel-name a"]
+                for sel in selectors:
+                    if sb.is_element_visible(sel):
+                        channel = sb.get_text(sel)
+                        break
+
+                duration = 0
+                try:
+                    dur_str = sb.get_text(".ytp-time-duration")
+                    duration = self._parse_duration(dur_str)
+                except: duration = 600
+
+                thumbnail = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+
+                # --- TRANSCRIPCIÓN ---
                 transcript_text = ""
                 sub_source = "none"
 
-                # 1. Buscar Manuales ('subtitles')
-                subs_manual = info.get('subtitles', {})
-                # 2. Buscar Automáticos ('automatic_captions')
-                subs_auto = info.get('automatic_captions', {})
+                try:
+                    # Expandir descripción
+                    if sb.is_element_visible("#expand"): sb.click("#expand")
+                    elif sb.is_element_visible("#description-inline-expander"): sb.click("#description-inline-expander")
+                    sb.sleep(1)
 
-                # Preferencia: Inglés manual > Inglés auto
-                # yt-dlp devuelve un diccionario: {'en': [...formatos...], 'es': ...}
-                
-                selected_subs = None
-                
-                # Buscar en manuales (en, en-US, en-GB)
-                for lang in ['en', 'en-US', 'en-GB']:
-                    if lang in subs_manual:
-                        selected_subs = subs_manual[lang]
-                        sub_source = 'manual'
-                        break
-                
-                # Si no, buscar en automáticos
-                if not selected_subs:
-                    for lang in ['en', 'en-US', 'en-orig']:
-                        if lang in subs_auto:
-                            selected_subs = subs_auto[lang]
-                            sub_source = 'generated'
+                    # Buscar botón transcripción
+                    found = False
+                    btns = [
+                        'button[aria-label="Mostrar transcripción"]', 'button:contains("Mostrar transcripción")',
+                        'button[aria-label="Show transcript"]', 'button:contains("Show transcript")',
+                        '#primary-button button'
+                    ]
+                    for btn in btns:
+                        if sb.is_element_present(btn):
+                            try: sb.scroll_to(btn)
+                            except: pass
+                            sb.click(btn)
+                            found = True
                             break
 
-                if selected_subs:
-                    # Descargamos el texto real
-                    transcript_text = self._fetch_transcript_text(selected_subs)
-                
+                    if found:
+                        sb.sleep(1)
+                        # Scroll al panel
+                        if sb.is_element_visible("ytd-transcript-renderer"):
+                            sb.scroll_to("ytd-transcript-renderer")
+                        else:
+                            sb.execute_script("window.scrollBy(0, 400);")
+                        
+                        sb.sleep(2)
+
+                        # Extraer texto
+                        if sb.wait_for_element(".segment-text", timeout=10):
+                            segments = sb.find_elements(".segment-text")
+                            full_text = [s.text for s in segments]
+                            transcript_text = " ".join(full_text).replace("\n", " ")
+                            transcript_text = re.sub(self.clean_regex, "", transcript_text)
+                            if transcript_text: sub_source = "manual"
+
+                except Exception:
+                    pass 
+
                 if not transcript_text:
-                    logger.warning(f"⚠️ Video sin subtítulos válidos: {title}")
+                    logger.warning(f"❌ Sin subtítulos: {title[:20]}...")
                     return None
 
                 # Métricas
                 word_count = len(transcript_text.split())
                 wpm = self._calculate_wpm(word_count, duration)
 
-                logger.info(f"✅ Procesado (yt-dlp): {title[:30]}... ({sub_source})")
+                logger.info(f"✅ OK: {title[:40]}... | 🗣️ {channel} | ⚡ {wpm} WPM")
 
-                return {
+                data = {
                     "video_id": video_id,
                     "url": url,
                     "title": title,
-                    "channel": channel_name,
+                    "channel": channel,
                     "duration_seconds": duration,
                     "thumbnail": thumbnail,
                     "wpm": wpm,
@@ -153,47 +160,42 @@ class VideoMetadataExtractor:
                     "transcript_full": transcript_text
                 }
 
+            except Exception as e:
+                # Mostramos solo el mensaje corto del error para no ensuciar
+                logger.error(f"❌ Error en {video_id}: {str(e)[:50]}...")
+                return None
+        
+        return data
+
+    async def process_video(self, url: str):
+        try:
+            return await asyncio.to_thread(self._scrape_sync, url)
         except Exception as e:
-            logger.error(f"Error general procesando {url}: {e}")
+            logger.error(f"Error thread: {e}")
             return None
 
-# Funciones Helper para las playlists (Compatibilidad)
+# --- Helpers (Silenciados) ---
 def get_videos_from_playlist(playlist_url: str):
-    # yt-dlp también es EXCELENTE sacando playlists rápido
-    # Usamos 'extract_flat' para no analizar cada video, solo sacar la lista (muy rápido)
-    opts = {
-        'extract_flat': True, 
-        'quiet': True,
-        'skip_download': True
-    }
+    opts = {'extract_flat': True, 'quiet': True, 'skip_download': True}
     urls = []
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
             res = ydl.extract_info(playlist_url, download=False)
             if 'entries' in res:
                 for entry in res['entries']:
-                    # Construimos la URL completa
-                    if entry.get('url'):
-                         urls.append(entry['url'])
-                    elif entry.get('id'):
-                         urls.append(f"https://www.youtube.com/watch?v={entry['id']}")
-        except Exception as e:
-            print(f"Error leyendo playlist con yt-dlp: {e}")
+                    if entry.get('url'): urls.append(entry['url'])
+                    elif entry.get('id'): urls.append(f"https://www.youtube.com/watch?v={entry['id']}")
+        except: pass
     return urls
 
 def get_videos_from_channel(channel_url, limit=10):
-    # Reutilizamos la lógica de playlist, yt-dlp trata canales como playlists
-    # Para el límite, yt-dlp tiene 'playlistend'
-    opts = {
-        'extract_flat': True, 
-        'quiet': True,
-        'skip_download': True,
-        'playlistend': limit
-    }
+    opts = {'extract_flat': True, 'quiet': True, 'skip_download': True, 'playlistend': limit}
     urls = []
     with yt_dlp.YoutubeDL(opts) as ydl:
-        res = ydl.extract_info(channel_url, download=False)
-        if 'entries' in res:
-            for entry in res['entries']:
-                 urls.append(f"https://www.youtube.com/watch?v={entry['id']}")
+        try:
+            res = ydl.extract_info(channel_url, download=False)
+            if 'entries' in res:
+                for entry in res['entries']:
+                     urls.append(f"https://www.youtube.com/watch?v={entry['id']}")
+        except: pass
     return urls

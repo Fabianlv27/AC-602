@@ -1,22 +1,28 @@
 import asyncio
 import os
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # --- TUS MÓDULOS ---
-# Asegúrate de que las carpetas existen: functions/ y models/
 from functions.Metadata import VideoMetadataExtractor, get_videos_from_playlist
 from functions.AI_Service import generate_response as analyze_with_ai
 from database import AsyncSessionLocal, engine, Base
 from models.video import Video, CefrEnum, SubSourceEnum
 
+# --- CONFIGURACIÓN DEL PILOTO AUTOMÁTICO (LO QUE PEDISTE) ---
+TOTAL_HOURS_TO_RUN = 2      # Duración total del script (horas de sueño)
+BATCH_SIZE = 50             # Videos por tanda (Para no saturar memoria)
+COOLDOWN_MINUTES = 15       # Descanso entre tandas (Para proteger IP)
+CONCURRENT_WORKERS = 1      # OBLIGATORIO: 1 para Selenium
+
 # --- CONFIGURACIÓN DE ARCHIVOS ---
 STATE_FILE = "Data/crawler_state.json"
 PLAYLIST_FILE = "Data/Playlists.txt"
 
-# --- CLASE PRINCIPAL ---
+# --- CLASE PRINCIPAL (PIPELINE) ---
 class VideoPipeline:
     def __init__(self):
         self.extractor = VideoMetadataExtractor()
@@ -34,11 +40,9 @@ class VideoPipeline:
             return existing
         
         async with AsyncSessionLocal() as session:
-            # Procesamos en bloques para no saturar la query
             chunk_size = 500 
             for i in range(0, len(video_ids), chunk_size):
                 chunk = video_ids[i:i + chunk_size]
-                # Nota: Video.video_id debe coincidir con tu modelo
                 result = await session.execute(
                     select(Video.video_id).where(Video.video_id.in_(chunk))
                 )
@@ -51,19 +55,14 @@ class VideoPipeline:
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 try:
-                    # 1. Validación y Conversión de Datos
-                    
-                    # Validar Enum de Nivel
                     level_val = final_data.get("level")
                     if level_val not in [e.value for e in CefrEnum]:
                         level_val = None 
 
-                    # Validar Fuente Subtítulos
                     sub_source_val = final_data.get("subtitle_source", "none")
                     if sub_source_val not in [e.value for e in SubSourceEnum]:
                         sub_source_val = "none"
                     
-                    # Convertir strings únicos a Listas para los ARRAYs de Postgres
                     accent_val = final_data.get("accent", "Mixed")
                     accent_list = [accent_val] if isinstance(accent_val, str) else accent_val
 
@@ -72,28 +71,20 @@ class VideoPipeline:
 
                     topics_list = final_data.get("topics", [])
 
-                    # 2. Crear Objeto ORM
                     video_entry = Video(
                         video_id=final_data["video_id"],
                         title=final_data["title"],
                         url=final_data["url"],
                         channel_name=final_data["channel"],
-                        
-                        # Arrays
                         topics=topics_list,
                         accents=accent_list,
                         content_types=type_list,
-                        
-                        # Enums y Métricas
                         level=level_val,
                         wpm=final_data["wpm"],
                         subtitle_source=sub_source_val,
-                        
-                        # JSONB (Respaldo crudo de la IA)
                         ai_analysis=final_data.get("ai_raw_output", {})
                     )
 
-                    # 3. Upsert (Merge)
                     await session.merge(video_entry)
                     print(f"💾 Guardado en DB: {final_data['title'][:40]}...")
                 
@@ -104,16 +95,15 @@ class VideoPipeline:
     async def process_single_video(self, url: str):
         """Orquesta: Extracción -> IA -> Guardado"""
         try:
-            # 1. Extracción de Metadatos (Youtube)
+            # 1. Extracción de Metadatos (Selenium / yt-dlp)
             metadata = await self.extractor.process_video(url)
             
             if not metadata:
-                return # Falló la descarga o no tiene subtítulos
+                return 
 
             # 2. Análisis de IA
             transcript = metadata.get("transcript_full", "")
             
-            # Filtro: Si es muy corto, no gastamos IA
             if not transcript or len(transcript) < 50:
                 print(f"⚠️ Transcript vacío o muy corto: {url}")
                 return
@@ -127,8 +117,8 @@ class VideoPipeline:
 
             # 3. Fusión de Datos
             final_package = {
-                **metadata,      # Datos técnicos (wpm, duration...)
-                **ai_result,     # Datos lingüísticos (level, topics...)
+                **metadata,
+                **ai_result,
                 "ai_raw_output": ai_result
             }
 
@@ -138,7 +128,7 @@ class VideoPipeline:
         except Exception as e:
             print(f"❌ Error procesando video {url}: {e}")
 
-# --- GESTIÓN DE ESTADO (MEMORIA DEL CRAWLER) ---
+# --- GESTIÓN DE ESTADO ---
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -160,111 +150,140 @@ def load_playlists():
     if not os.path.exists(PLAYLIST_FILE):
         return []
     with open(PLAYLIST_FILE, "r") as f:
-        # Ignora líneas vacías o comentarios (#)
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
-# --- FUNCIÓN PRINCIPAL ---
+# --- LOGICA DE TANDA INDIVIDUAL ---
 
-async def main():
-    # 0. Inicialización
-    pipeline = VideoPipeline()
-    await pipeline.init_db_schema()
-
-    # --- CONFIGURACIÓN DE LA TANDA ---
-    VIDEOS_PER_RUN = 50        # Cuántos videos procesar hoy
-    CONCURRENT_WORKERS = 1    # Cuántos hilos simultáneos
-
-    # 1. Cargar Estado y Playlists
+async def run_batch_cycle(pipeline):
+    """
+    Ejecuta UNA tanda de trabajo (máximo BATCH_SIZE videos).
+    Retorna: int (número de videos procesados realmente)
+    """
     playlists = load_playlists()
     state = load_state()
     current_idx = state.get("current_index", 0)
 
     if not playlists:
-        print(f"⚠️ El archivo {PLAYLIST_FILE} está vacío o no existe.")
-        return
+        print(f"⚠️ El archivo {PLAYLIST_FILE} está vacío.")
+        return 0
 
-    # Corrección de índice por si borraste playlists del archivo txt
     if current_idx >= len(playlists):
         current_idx = 0
 
     target_playlist = playlists[current_idx]
-    print(f"\n📂 Estado Cargado | Playlist actual: #{current_idx} ({target_playlist[-15:]}...)")
+    print(f"\n📂 Analizando Playlist #{current_idx}: {target_playlist[-15:]}...")
     
     videos_to_process = []
     
     try:
-        # 2. Obtener videos de la playlist objetivo
-        print("📡 Obteniendo lista de videos desde YouTube...")
+        # Obtener lista rápida (yt-dlp flat)
         all_urls = get_videos_from_playlist(target_playlist)
+        # Analizamos los primeros 60 para tener margen sobre el BATCH_SIZE de 50
+        candidate_urls = all_urls[:(BATCH_SIZE + 10)]
         
-        # Recortamos la búsqueda a los primeros 50 para no analizar listas de 2000 videos
-        # Asumiendo que los videos nuevos salen arriba.
-        candidate_urls = all_urls[:50] 
-        
-        # 3. Extraer IDs para verificar en DB
         url_map = {}
         for url in candidate_urls:
-            # Extraer ID de la URL estándar de YouTube
             if "v=" in url:
                 try:
                     vid_id = url.split("v=")[1].split("&")[0]
                     url_map[vid_id] = url
-                except:
-                    pass
+                except: pass
         
         candidate_ids = list(url_map.keys())
-        
-        # 4. Filtro: ¿Cuáles ya tenemos?
         existing_ids = await pipeline.get_existing_ids(candidate_ids)
         new_ids = [vid for vid in candidate_ids if vid not in existing_ids]
         
-        print(f"📊 Análisis: {len(candidate_ids)} escaneados | {len(existing_ids)} ya existen | {len(new_ids)} NUEVOS.")
+        print(f"📊 Estado Playlist: {len(new_ids)} videos nuevos disponibles.")
 
         if not new_ids:
-            # CASO A: No hay nada nuevo en esta playlist -> ESTÁ COMPLETADA
-            print("✅ Playlist al día. Avanzando al siguiente índice.")
-            
-            # Avanzamos índice (Circular)
+            # Playlist completada, pasamos a la siguiente
+            print("✅ Playlist al día. Cambiando índice...")
             next_index = (current_idx + 1) % len(playlists)
             save_state(next_index)
-            print(f"⏭️ Próxima ejecución será en Playlist #{next_index}")
-
+            return 0 # No procesamos nada, devolvemos 0
         else:
-            # CASO B: Hay videos nuevos -> A TRABAJAR
-            count_to_do = min(len(new_ids), VIDEOS_PER_RUN)
-            print(f"🔨 Procesando lote de {count_to_do} videos...")
+            # Hay trabajo, seleccionamos lote
+            count_to_do = min(len(new_ids), BATCH_SIZE)
+            print(f"🔨 Agregando {count_to_do} videos a la cola de trabajo...")
             
             ids_to_do = new_ids[:count_to_do]
             for vid_id in ids_to_do:
                 videos_to_process.append(url_map[vid_id])
             
-            # NOTA: NO avanzamos el índice.
-            # La próxima vez volveremos a esta playlist para terminar los que faltaron.
+            # Procesamiento
+            if videos_to_process:
+                print(f"🚀 Ejecutando Workers (Simultáneos: {CONCURRENT_WORKERS})...")
+                semaphore = asyncio.Semaphore(CONCURRENT_WORKERS)
+
+                async def worker(url):
+                    async with semaphore:
+                        await pipeline.process_single_video(url)
+
+                tasks = [worker(url) for url in videos_to_process]
+                await asyncio.gather(*tasks)
+                print("✨ Tanda terminada.")
+                return len(videos_to_process)
+            
+            return 0
 
     except Exception as e:
-        print(f"❌ Error crítico leyendo playlist: {e}")
-        # Opcional: Avanzar índice si la playlist está rota/privada
-        # save_state((current_idx + 1) % len(playlists))
+        print(f"❌ Error en run_batch_cycle: {e}")
+        return 0
 
-    # 5. Ejecución del Trabajo (Crawler)
-    if videos_to_process:
-        print(f"🚀 Iniciando workers ({CONCURRENT_WORKERS} simultáneos)...")
-        semaphore = asyncio.Semaphore(CONCURRENT_WORKERS)
+# --- CONTROLADOR PILOTO AUTOMÁTICO ---
 
-        async def worker(url):
-            async with semaphore:
-                await pipeline.process_single_video(url)
+async def autopilot_main():
+    """
+    Bucle principal que gestiona el tiempo total y los descansos.
+    """
+    pipeline = VideoPipeline()
+    await pipeline.init_db_schema()
+    
+    end_time = datetime.now() + timedelta(hours=TOTAL_HOURS_TO_RUN)
+    
+    print("\n" + "="*50)
+    print(f"🤖 PILOTO AUTOMÁTICO ACTIVADO")
+    print(f"🕒 Inicio: {datetime.now().strftime('%H:%M:%S')}")
+    print(f"🛑 Fin programado: {end_time.strftime('%H:%M:%S')}")
+    print(f"📦 Config: {BATCH_SIZE} videos/tanda | {COOLDOWN_MINUTES} min descanso")
+    print("="*50 + "\n")
 
-        tasks = [worker(url) for url in videos_to_process]
-        await asyncio.gather(*tasks)
-        print("\n✨ Tanda finalizada con éxito.")
-    else:
-        print("\n💤 Sin tareas pendientes por hoy.")
+    while datetime.now() < end_time:
+        
+        start_t = time.time()
+        
+        # EJECUTAR UNA TANDA
+        processed_count = await run_batch_cycle(pipeline)
+        
+        elapsed = time.time() - start_t
+        
+        # VERIFICAR SI QUEDA TIEMPO
+        time_left = end_time - datetime.now()
+        if time_left.total_seconds() <= 0:
+            break
+
+        # LOGICA DE DESCANSO
+        if processed_count > 0:
+            # Si trabajamos, descansamos para enfriar IP y RAM
+            print(f"\n❄️ Tanda de {processed_count} videos completada en {int(elapsed)}s.")
+            print(f"💤 ENFRIANDO MOTORES: Durmiendo {COOLDOWN_MINUTES} minutos...")
+            time.sleep(COOLDOWN_MINUTES * 60)
+            print("🔔 Despertando para nueva tanda...\n")
+        
+        else:
+            # Si NO trabajamos (playlist vacía), esperamos solo un poco antes de
+            # probar la siguiente playlist, para no saturar logs si hay muchas vacías.
+            print("⏩ Playlist vacía o error. Saltando brevemente (30s)...")
+            time.sleep(30)
+
+    print("\n🎉 TIEMPO CUMPLIDO. El Piloto Automático ha finalizado su turno.")
 
 if __name__ == "__main__":
-    # Verificación de entorno
     if not os.getenv("GROQ_API_KEY"):
-        print("❌ ERROR: No se encontró la variable de entorno GROQ_API_KEY")
-        print("   Ejecuta: export GROQ_API_KEY='tu_api_key' (Linux/Mac) o $env:GROQ_API_KEY='tu_api_key' (Windows)")
+        print("❌ ERROR: Falta GROQ_API_KEY")
     else:
-        asyncio.run(main())
+        try:
+            asyncio.run(autopilot_main())
+        except KeyboardInterrupt:
+            print("\n🛑 Detenido manualmente por el usuario.")
+            # Opcional: os.system("shutdown /s /t 60")
