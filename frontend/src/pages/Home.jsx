@@ -1,18 +1,46 @@
 import { useState, useEffect } from 'react';
-import { Search, Filter, SlidersHorizontal } from 'lucide-react';
-import api from '../../services/api';
-import VideoCard from '../components/VideoCard'; // <--- IMPORTANTE
+import { Search, Filter, SlidersHorizontal, X, Globe } from 'lucide-react'; // Importa Globe
+import api from '../services/api';
+import VideoCard from '../components/VideoCard';
 
 export default function Home() {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [filters, setFilters] = useState({
-    search: '',
-    level: '',
-    topic: '',
-    channel: ''
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
+
+  // Estado para opciones
+  const [filterOptions, setFilterOptions] = useState({
+    levels: [],
+    types: [],
+    topics: [],
+    languages: {} // Objeto del accents.json
   });
 
+  const [filters, setFilters] = useState({
+    search: '',
+    topic: '',
+    level: '',
+    source: '',
+    accent: '',
+    speed: '',
+    type: '',
+    language: '' // Nuevo estado
+  });
+
+  // 1. Cargar Opciones
+  useEffect(() => {
+    const fetchOptions = async () => {
+      try {
+        const res = await api.get('/videos/filters');
+        setFilterOptions(res.data);
+      } catch (error) {
+        console.error("Error cargando filtros:", error);
+      }
+    };
+    fetchOptions();
+  }, []);
+
+  // 2. Cargar Videos
   useEffect(() => {
     const timeoutId = setTimeout(() => fetchVideos(), 500);
     return () => clearTimeout(timeoutId);
@@ -31,95 +59,152 @@ export default function Home() {
     }
   };
 
-  const handleFilterChange = (e) => setFilters({ ...filters, [e.target.name]: e.target.value });
+  const handleFilterChange = (e) => {
+    const { name, value } = e.target;
+    
+    // Si cambia el idioma, reseteamos el acento para evitar inconsistencias
+    if (name === 'language') {
+      setFilters({ ...filters, language: value, accent: '' });
+    } else {
+      setFilters({ ...filters, [name]: value });
+    }
+  };
+
+  const clearFilters = () => setFilters({
+    search: '', topic: '', level: '', source: '', accent: '', speed: '', type: '', language: ''
+  });
+
+  // Helper para obtener acentos según idioma seleccionado
+  const availableAccents = filters.language && filterOptions.languages[filters.language]
+    ? filterOptions.languages[filters.language].accents
+    : [];
 
   return (
-    <div className="min-h-screen">
-      {/* --- HERO SECTION --- */}
-      <div className="bg-indigo-900 py-16 px-4 relative overflow-hidden">
-        {/* Decoración de fondo */}
-        <div className="absolute top-0 left-0 w-full h-full overflow-hidden opacity-20">
-             <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-purple-500 blur-3xl mix-blend-multiply"></div>
-             <div className="absolute top-1/2 right-0 w-80 h-80 rounded-full bg-indigo-400 blur-3xl mix-blend-multiply"></div>
-        </div>
+    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row">
+      
+      {/* SIDEBAR */}
+      <aside className={`fixed inset-y-0 left-0 z-40 w-72 bg-white border-r border-slate-200 transform transition-transform duration-300 md:translate-x-0 md:static overflow-y-auto ${showMobileFilters ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="p-6">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+              <Filter size={20} className="text-indigo-600" /> Filtros
+            </h2>
+            <button onClick={clearFilters} className="text-xs text-slate-500 hover:text-indigo-600 underline">Limpiar</button>
+            <button onClick={() => setShowMobileFilters(false)} className="md:hidden"><X size={24} /></button>
+          </div>
 
-        <div className="max-w-4xl mx-auto text-center relative z-10">
-          <h1 className="text-4xl md:text-5xl font-extrabold text-white mb-6 tracking-tight">
-            Domina el inglés con <span className="text-indigo-200">contenido real</span>
-          </h1>
-          <p className="text-indigo-100 text-lg mb-8 max-w-2xl mx-auto">
-            Aprende con videos de YouTube analizados por IA, clasificados por nivel CEFR y vocabulario específico.
-          </p>
-
-          {/* BARRA DE BÚSQUEDA FLOTANTE */}
-          <div className="bg-white p-2 rounded-2xl shadow-xl flex flex-col md:flex-row gap-2 max-w-3xl mx-auto">
-            <div className="relative flex-1">
-              <Search className="absolute left-4 top-3.5 text-slate-400" size={20} />
-              <input
-                type="text"
-                name="search"
-                placeholder="Busca temas, títulos..."
-                className="w-full pl-12 pr-4 py-3 rounded-xl bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all placeholder:text-slate-400 text-slate-700"
-                onChange={handleFilterChange}
-              />
-            </div>
+          <div className="space-y-6">
             
-            <div className="flex gap-2">
+            {/* BUSCADOR */}
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Búsqueda</label>
               <div className="relative">
-                 <select 
-                    name="level" 
-                    onChange={handleFilterChange} 
-                    className="appearance-none h-full pl-4 pr-10 py-3 bg-slate-50 rounded-xl border-none focus:ring-2 focus:ring-indigo-500 text-slate-700 font-medium cursor-pointer hover:bg-slate-100 transition-colors"
-                 >
-                  <option value="">Nivel</option>
-                  <option value="A1">A1</option>
-                  <option value="A2">A2</option>
-                  <option value="B1">B1</option>
-                  <option value="B2">B2</option>
-                  <option value="C1">C1</option>
-                  <option value="C2">C2</option>
-                </select>
-                <Filter className="absolute right-3 top-3.5 text-slate-400 pointer-events-none" size={16} />
+                <Search className="absolute left-3 top-2.5 text-slate-400" size={16} />
+                <input type="text" name="search" value={filters.search} onChange={handleFilterChange} placeholder="Título..." className="w-full pl-9 pr-3 py-2 bg-slate-50 border rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
               </div>
             </div>
+
+            {/* --- NUEVO: FILTRO DE IDIOMA --- */}
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Idioma</label>
+              <div className="relative">
+                <Globe className="absolute left-3 top-2.5 text-slate-400" size={16} />
+                <select name="language" value={filters.language} onChange={handleFilterChange} className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none">
+                  <option value="">Todos los idiomas</option>
+                  {Object.entries(filterOptions.languages || {}).map(([code, data]) => (
+                    <option key={code} value={code}>{data.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* --- FILTRO DE ACENTOS (DEPENDIENTE) --- */}
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Acento</label>
+              <select 
+                name="accent" 
+                value={filters.accent} 
+                onChange={handleFilterChange} 
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none disabled:bg-slate-100 disabled:text-slate-400"
+                disabled={!filters.language} // Deshabilitado si no hay idioma
+              >
+                <option value="">
+                  {!filters.language ? "Selecciona un idioma primero" : "Cualquier acento"}
+                </option>
+                {availableAccents.map((acc, index) => (
+                  <option key={index} value={acc}>{acc}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* RESTO DE FILTROS (Tags, Nivel, Tipo, Velocidad, Subtítulos) */}
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Tema / Tag</label>
+              <select name="topic" value={filters.topic} onChange={handleFilterChange} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none">
+                <option value="">Cualquier tema</option>
+                {filterOptions.topics.map((t, i) => <option key={i} value={t}>{t}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Nivel</label>
+              <select name="level" value={filters.level} onChange={handleFilterChange} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none">
+                <option value="">Todos los niveles</option>
+                {filterOptions.levels.map((l, i) => <option key={i} value={l}>{l}</option>)}
+              </select>
+            </div>
+
+             <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Tipo de Vocabulario</label>
+              <select name="type" value={filters.type} onChange={handleFilterChange} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none">
+                <option value="">Cualquiera</option>
+                {filterOptions.types.map((t, i) => <option key={i} value={t}>{t}</option>)}
+              </select>
+            </div>
+            
+            {/* Velocidad y Subtítulos (Igual que antes) */}
+             <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Velocidad</label>
+              <div className="grid grid-cols-3 gap-2">
+                {['slow', 'normal', 'fast'].map((s) => (
+                  <button key={s} onClick={() => setFilters({...filters, speed: filters.speed === s ? '' : s})} className={`text-xs py-2 rounded-lg border transition-colors ${filters.speed === s ? 'bg-indigo-100 border-indigo-200 text-indigo-700 font-bold' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
+                    {s === 'slow' ? 'Lento' : s === 'normal' ? 'Normal' : 'Rápido'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Subtítulos</label>
+              <select name="source" value={filters.source} onChange={handleFilterChange} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none">
+                <option value="">Cualquiera</option>
+                <option value="manual">Manuales</option>
+                <option value="generated">Generados</option>
+                <option value="none">Sin subtítulos</option>
+              </select>
+            </div>
+
           </div>
         </div>
-      </div>
+      </aside>
 
-      {/* --- CONTENT GRID --- */}
-      <div className="max-w-7xl mx-auto px-4 py-12">
-        <div className="flex items-center justify-between mb-8">
-          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-            <SlidersHorizontal size={24} className="text-indigo-600" />
-            Videos Recientes
-          </h2>
-          <span className="text-sm text-slate-500 bg-white px-3 py-1 rounded-full border shadow-sm">
-            {videos.length} resultados
-          </span>
-        </div>
-
-        {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-pulse">
-            {[1,2,3].map(i => (
-              <div key={i} className="bg-white rounded-2xl h-80"></div>
-            ))}
+      {/* MAIN CONTENT (Igual) */}
+      <main className="flex-1 p-4 md:p-8 overflow-y-auto h-screen">
+          {/* ... (Todo igual que antes) ... */}
+           <div className="md:hidden flex justify-between items-center mb-6">
+            <h1 className="font-bold text-xl text-slate-800">Videos</h1>
+            <button onClick={() => setShowMobileFilters(true)} className="flex items-center gap-2 bg-white px-4 py-2 rounded-lg shadow-sm border text-sm font-medium">
+              <SlidersHorizontal size={16} /> Filtros
+            </button>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
-            {videos.map((video) => (
-              <VideoCard key={video.video_id} video={video} />
-            ))}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            {loading 
+              ? [1,2,3].map(i => <div key={i} className="bg-slate-200 h-60 rounded-2xl animate-pulse"/>)
+              : videos.map(video => <VideoCard key={video.video_id} video={video} />)
+            }
+            {!loading && videos.length === 0 && <div className="col-span-full text-center text-slate-500 mt-10">No hay videos con estos filtros.</div>}
           </div>
-        )}
-
-        {!loading && videos.length === 0 && (
-          <div className="text-center py-20">
-            <div className="text-6xl mb-4">🔍</div>
-            <h3 className="text-xl font-bold text-slate-700">No encontramos videos</h3>
-            <p className="text-slate-500">Intenta cambiar los filtros de búsqueda.</p>
-          </div>
-        )}
-      </div>
+      </main>
     </div>
   );
 }

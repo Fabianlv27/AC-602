@@ -1,0 +1,56 @@
+{
+  "en": {
+    "label": "Inglés (English)",
+    "accents": [
+      "American",
+      "British",
+      "Australian",
+      "Canadian",
+      "Irish",
+      "Scottish",
+      "Global / Neutral"
+    ]
+  },
+  "es": {
+    "label": "Español (Spanish)",
+    "accents": [
+      "Spain (Castilian)",
+      "Latin American (General)",
+      "Mexican",
+      "Argentine/Rioplatense",
+      "Colombian",
+      "Caribbean"
+    ]
+  },
+  "fr": {
+    "label": "Francés (French)",
+    "accents": [
+      "Parisian/Metropolitan",
+      "Canadian (Québécois)",
+      "African French"
+    ]
+  },
+  "de": {
+    "label": "Alemán (German)",
+    "accents": [
+      "Standard German (Hochdeutsch)",
+      "Austrian",
+      "Swiss German"
+    ]
+  },
+  "it": {
+    "label": "Italiano (Italian)",
+    "accents": [
+      "Standard",
+      "Northern",
+      "Southern/Sicilian"
+    ]
+  },
+  "pt": {
+    "label": "Portugués (Portuguese)",
+    "accents": [
+      "Brazilian",
+      "European (Portugal)"
+    ]
+  }
+}

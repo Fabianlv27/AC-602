@@ -1,109 +1,127 @@
 from http.client import HTTPException
 import json
-from groq import AsyncGroq
+from groq import AsyncGroq, RateLimitError
 from dotenv import load_dotenv
-
 import os
+import random
+
 load_dotenv()
 
-api_key = os.getenv("GROQ_API_KEY")
-client = AsyncGroq(api_key=api_key)
+# --- 1. GESTIÓN DE MÚLTIPLES CLAVES (ROTACIÓN) ---
+# Cargamos todas las claves y limpiamos espacios
+keys_string = os.getenv("GROQ_API_KEYS", "")
+API_KEYS = [k.strip() for k in keys_string.split(",") if k.strip()]
 
-# --- 1. CARGA DE DATOS (Corregido) ---
+if not API_KEYS:
+    print("❌ ERROR: No se encontraron claves en GROQ_API_KEYS")
+    API_KEYS = ["dummy_key"] # Para evitar crash inmediato, fallará luego
+
+async def get_groq_completion(messages, system_instruction, model="llama-3.1-8b-instant"):
+    """
+    Intenta realizar la petición rotando claves si encuentra un error 429.
+    """
+    # Intentamos con cada clave disponible
+    for i, api_key in enumerate(API_KEYS):
+        try:
+            # Instanciamos el cliente con la clave actual
+            client = AsyncGroq(api_key=api_key)
+            
+            chat_completion = await client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    # Si messages ya tiene estructura, úsala, si no, adáptalo
+                ],
+                model=model,
+                temperature=0.1,
+                response_format={"type": "json_object"}, 
+                max_completion_tokens=1500,
+            )
+            return chat_completion.choices[0].message.content
+
+        except RateLimitError:
+            print(f"⚠️ Clave {i+1}/{len(API_KEYS)} agotada (429). Cambiando a la siguiente...")
+            continue # Salta a la siguiente clave en el bucle
+            
+        except Exception as e:
+            # Si el error contiene "429" en el mensaje (a veces Groq lo lanza como APIError genérico)
+            if "429" in str(e):
+                print(f"⚠️ Clave {i+1}/{len(API_KEYS)} agotada (Error genérico 429). Rotando...")
+                continue
+            
+            # Si es otro error, lo lanzamos
+            print(f"❌ Error en cliente Groq (Clave {i+1}): {e}")
+            raise e
+            
+    # Si salimos del bucle, es que todas fallaron
+    raise Exception("Rate limit reached on ALL available API keys.")
+
+# --- CARGA DE DATOS (Igual que antes) ---
 def load_constraints():
-    # Asegúrate de que las rutas y nombres de archivo sean correctos
     try:
         with open("Data/Etiquetas.json", "r", encoding="utf-8") as f:
             tags_list = json.load(f)
-        
         with open("Data/Niveles.json", "r", encoding="utf-8") as f:
             levels_list = json.load(f)
-
         with open("Data/Tipos.json", "r", encoding="utf-8") as f: 
             types_list = json.load(f)
-            
         return tags_list, levels_list, types_list
-    except FileNotFoundError as e:
-        print(f"Error cargando JSONs de configuración: {e}")
-        return [], [], [] # Retorno seguro para no romper, pero deberías revisar los archivos
+    except FileNotFoundError:
+        return [], [], []
 
-# --- 2. EL PROMPT "ANTI-ALUCINACIONES" ---
-def GetPrompt(transcript_text):
-    tags, levels, types = load_constraints()
+# --- EL PROMPT (Igual que antes) ---
+def GetPrompt(transcript_text, tags, levels, types):
+    tags_str = ", ".join([f'"{t}"' for t in tags]) if tags else "Technology, Business"
+    levels_str = ", ".join([f'"{l}"' for l in levels]) if levels else "B1, B2"
+    types_str = ", ".join([f'"{t}"' for t in types]) if types else "General"
     
-    tags_str = ", ".join([f'"{t}"' for t in tags])
-    levels_str = ", ".join([f'"{l}"' for l in levels])
-    types_str = ", ".join([f'"{t}"' for t in types])
-   
-    example_json = {
-        "level": "B1",
-        "topics": [tags[0] if tags else "Technology", tags[1] if len(tags)>1 else "Business", tags[2] if len(tags)>2 else "Life"],
-        "accent": "US",
-        "type": types[0] if types else "Informal"
+    json_structure = {
+        "summary": "Concise summary in 2 lines (ENGLISH).",
+        "transcript_summary": "Detailed summary (max 500 chars) (ENGLISH).",
+        "level": "One value from list.",
+        "topics": ["Tag1", "Tag2", "Tag3"],
+        "accents": ["US", "British"],
+        "content_types": ["Type1"],
+        "wpm_estimate": 150,
+        "vocabulary": [{ "term": "Word", "definition": "Short definition in English." }],
+        "grammar_stats": { "subjunctive": "Low", "past_tense": "Medium", "future_tense": "Low", "connectors": "High" },
+        "functional_use": "E.g.: To learn business negotiation."
     }
-    
+
     prompt = f"""
-    Role: You are an expert linguist and video classifier for English learners.
+    Role: Expert English linguist.
+    Task: Extract metadata. ALL OUTPUT MUST BE IN ENGLISH.
     
-    Task: Analyze the provided transcript snippet and extract metadata strictly following the constraints below.
+    CONSTRAINTS:
+    1. LEVEL: [{levels_str}]
+    2. TOPICS: Choose 3 from [{tags_str}]
+    3. CONTENT_TYPES: Choose from [{types_str}]
+    4. ACCENTS: Infer list based on context.
+
+    OUTPUT JSON STRUCTURE:
+    {json.dumps(json_structure)}
     
-    CONSTRAINTS (You MUST chose values ONLY from these lists):
-    1. LEVEL: {levels_str}
-    2. TOPICS: Choose exactly 3 tags from: [{tags_str}]
-    3. ACCENT: Choose one from ["US", "UK", "AUS"] based on spelling (color/colour) and vocabulary.
-    4. TYPE: Choose one from: [{types_str}]
-    
-    OUTPUT FORMAT:
-    Return ONLY a raw JSON object. Do not include markdown formatting like ```json ... ```.
-    
-    EXAMPLE INPUT:
-    "Hello guys, today we are gonna grab some coffee and chat about..."
-    
-    EXAMPLE OUTPUT:
-    {json.dumps(example_json)}
-    
-    REAL TRANSCRIPT TO ANALYZE:
-    "{transcript_text[:3500]}..." 
+    TRANSCRIPT:
+    "{transcript_text[:6000]}" 
     """
     return prompt
 
-# --- 3. GENERACIÓN Y LIMPIEZA ---
+# --- GENERACIÓN PRINCIPAL ---
 async def generate_response(transcript_text) -> dict:
     try:
-        system_instruction = GetPrompt(transcript_text)
+        tags, levels, types = load_constraints()
+        system_instruction = GetPrompt(transcript_text, tags, levels, types)
         
-        chat_completion = await client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_instruction
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            temperature=0.1,
-            response_format={"type": "json_object"}, 
-            max_completion_tokens=512,
-        )
-        
-        text_resp = chat_completion.choices[0].message.content
+        # LLAMADA CON ROTACIÓN
+        try:
+            text_resp = await get_groq_completion([], system_instruction)
+        except Exception as e:
+            return {"error": f"Todas las claves fallaron: {str(e)}"}
         
         try:
             parsed = json.loads(text_resp)
-            print(parsed)
-            final_result = {
-                "level": parsed.get("level", "Unrated"),
-                "topics": parsed.get("topics", []),
-                "accent": parsed.get("accent", "Mixed"),
-                "type": parsed.get("type", "General")
-            }
-            
-            return final_result
-            
+            return parsed
         except json.JSONDecodeError:
-            print(f"❌ Error parseando JSON de la IA: {text_resp}")
-            return {"error": "Failed to parse AI response", "raw": text_resp}
+            return {"error": "Failed to parse AI response"}
 
     except Exception as e:
-        print(f"❌ Error crítico en GeminiService: {e}")
-        raise HTTPException(status_code=503, detail=f"Error IA: {str(e)}")
-    
+        return {"error": f"Error General IA: {str(e)}"}

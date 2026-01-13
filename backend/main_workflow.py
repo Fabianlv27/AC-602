@@ -12,7 +12,6 @@ from functions.AI_Service import generate_response as analyze_with_ai
 from database import AsyncSessionLocal, engine, Base
 from models.video import Video, CefrEnum, SubSourceEnum
 
-# --- CONFIGURACIÓN DEL PILOTO AUTOMÁTICO (LO QUE PEDISTE) ---
 TOTAL_HOURS_TO_RUN = 2      # Duración total del script (horas de sueño)
 BATCH_SIZE = 50             # Videos por tanda (Para no saturar memoria)
 COOLDOWN_MINUTES = 15       # Descanso entre tandas (Para proteger IP)
@@ -55,67 +54,100 @@ class VideoPipeline:
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 try:
+                    # 1. Extracción de datos para COLUMNAS SQL (Filtrado)
                     level_val = final_data.get("level")
                     if level_val not in [e.value for e in CefrEnum]:
                         level_val = None 
-
+                    
                     sub_source_val = final_data.get("subtitle_source", "none")
                     if sub_source_val not in [e.value for e in SubSourceEnum]:
                         sub_source_val = "none"
-                    
-                    accent_val = final_data.get("accent", "Mixed")
-                    accent_list = [accent_val] if isinstance(accent_val, str) else accent_val
 
-                    type_val = final_data.get("type", "General")
-                    type_list = [type_val] if isinstance(type_val, str) else type_val
+                    # Listas para columnas ARRAY
+                    # Nota: La IA devuelve 'accents' y 'content_types', aseguramos que sean listas
+                    accents_list = final_data.get("accents", [])
+                    if isinstance(accents_list, str): accents_list = [accents_list]
+                    
+                    types_list = final_data.get("content_types", [])
+                    if isinstance(types_list, str): types_list = [types_list]
 
                     topics_list = final_data.get("topics", [])
 
+                    # 2. Construcción del JSON LIMPIO (ai_analysis)
+                    # Aquí seleccionamos SOLO lo que queremos en el JSON, sin repetir lo de arriba
+                    ai_clean_json = {
+                        "summary": final_data.get("summary"),
+                        "transcript_summary": final_data.get("transcript_summary"),
+                        "vocabulary": final_data.get("vocabulary", []),
+                        "grammar_stats": final_data.get("grammar_stats", {}),
+                        "functional_use": final_data.get("functional_use"),
+                        "wpm_estimate": final_data.get("wpm_estimate")
+                    }
+
+                    # --- CREACIÓN DEL OBJETO ---
                     video_entry = Video(
                         video_id=final_data["video_id"],
                         title=final_data["title"],
                         url=final_data["url"],
-                        channel_name=final_data["channel"],
+                        channel_name=final_data["channel"],                        
+                        # --- COLUMNAS SQL (Para filtros rápidos) ---
                         topics=topics_list,
-                        accents=accent_list,
-                        content_types=type_list,
+                        accents=accents_list,
+                        content_types=types_list,
                         level=level_val,
                         wpm=final_data["wpm"],
                         subtitle_source=sub_source_val,
-                        ai_analysis=final_data.get("ai_raw_output", {})
+                        language=final_data.get("language", "en"), 
+                        
+                        # --- DATOS DE TEXTO ---
+                        transcript=final_data.get("transcript_full", ""),
+                        transcript_json=final_data.get("transcript_json", []),
+                        
+                        # --- COLUMNA JSON (Solo contenido rico, SIN duplicados) ---
+                        ai_analysis=ai_clean_json
                     )
 
                     await session.merge(video_entry)
-                    print(f"💾 Guardado en DB: {final_data['title'][:40]}...")
+                    print(f"💾 Guardado optimizado en DB: {final_data['title'][:40]}...")
                 
                 except Exception as e:
                     print(f"❌ Error guardando SQL {final_data.get('video_id')}: {e}")
-                    await session.rollback()
-
+                    await session.rollback()                        
     async def process_single_video(self, url: str):
-        """Orquesta: Extracción -> IA -> Guardado"""
+        """Orquesta: Extracción -> IA (con contexto de país) -> Guardado"""
         try:
-            # 1. Extracción de Metadatos (Selenium / yt-dlp)
+            # 1. Extracción de Metadatos
             metadata = await self.extractor.process_video(url)
             
             if not metadata:
                 return 
 
-            # 2. Análisis de IA
+            # 2. Preparar datos para la IA
             transcript = metadata.get("transcript_full", "")
+            country = metadata.get("channel_country", "Desconocido")
             
             if not transcript or len(transcript) < 50:
                 print(f"⚠️ Transcript vacío o muy corto: {url}")
                 return
 
-            print(f"🧠 Enviando a IA: {metadata['title'][:30]}...")
-            ai_result = await analyze_with_ai(transcript)
+            print(f"🧠 Enviando a IA: {metadata['title'][:30]}... (Origen: {country})")
+            
+            # --- TRUCO: INYECTAR EL PAÍS EN EL PROMPT ---
+            # Concatenamos el país al principio del texto para que la IA lo sepa
+            prompt_con_contexto = (
+                f"CONTEXTO DEL CANAL: El creador del video está ubicado en: {country}. "
+                f"Usa esto para determinar el acento exacto (ej: si es ES -> Spain, si es AR -> Argentino).\n\n"
+                f"TRANSCRIPCIÓN DEL VIDEO:\n{transcript}"
+            )
+            
+            # Llamamos a la IA con el texto enriquecido
+            ai_result = await analyze_with_ai(prompt_con_contexto)
             
             if not ai_result or "error" in ai_result:
                 print(f"⚠️ Fallo en respuesta IA: {ai_result}")
                 return
 
-            # 3. Fusión de Datos
+            # 3. Fusión de Datos (Aquí el country se queda en metadata pero no lo guardamos)
             final_package = {
                 **metadata,
                 **ai_result,
@@ -127,7 +159,6 @@ class VideoPipeline:
             
         except Exception as e:
             print(f"❌ Error procesando video {url}: {e}")
-
 # --- GESTIÓN DE ESTADO ---
 
 def load_state():
