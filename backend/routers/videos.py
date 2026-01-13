@@ -59,108 +59,86 @@ async def get_db():
 # 1. ZONA PÚBLICA (SOLO LECTURA)
 #    No pide clave, pero tiene Rate Limit.
 # ==========================================
-@router.get("/", response_model=List[VideoResponse], 
-    dependencies=[Depends(RateLimiter(times=20, seconds=60))]) 
+@router.get("/", response_model=List[VideoResponse])
 async def read_videos(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(50, le=100),
-    
-    # --- TUS FILTROS ---
-    search: Optional[str] = Query(None, description="Busca en título"),
-    topic: Optional[str] = Query(None, description="Tag/Tema del video"),
-    level: Optional[CefrEnum] = Query(None, description="Nivel A1-C2"),
-    source: Optional[SubSourceEnum] = Query(None, description="manual, generated, none"),
-    accent: Optional[str] = Query(None, description="Acento (ej: British, American)"),
-    type: Optional[str] = Query(None, description="formal, informal, dia a dia"),
-    
-    # Filtro especial de velocidad (Lento/Normal/Rápido)
-    speed: Optional[str] = Query(None, description="slow, normal, fast"),
-    language: Optional[str] = Query(None, description="Código de idioma: en, es, fr..."),
-    
+    title: Optional[str] = None,
+    level: Optional[str] = None,
+    language: Optional[str] = None,
+    accent: Optional[str] = None,
+    topic: Optional[str] = None,
+    content_types: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db)
 ):
     query = select(Video)
 
-    if language:
-        query=query.where(Video.language==language)
-    # 1. Filtro por Título (Búsqueda general)
-    if search:
-        query = query.where(Video.title.ilike(f"%{search}%"))
-
-    # 2. Tag / Tema (Busca dentro del array topics)
-    if topic:
-        query = query.where(Video.topics.contains([topic]))
-
-    # 3. Nivel (Exacto)
+    if title:
+        query = query.where(Video.title.ilike(f"%{title}%"))
     if level:
         query = query.where(Video.level == level)
-
-    # 4. Subtítulos (Exacto: manual, generated, none)
-    if source:
-        query = query.where(Video.subtitle_source == source)
-
-    # 5. Acento (Busca dentro del array accents)
+    if language:
+        query = query.where(Video.language == language)
+    
+    # Filtros para Arrays (Postgres)
     if accent:
-        query = query.where(Video.accents.contains([accent]))
+        # Busca si el acento está contenido en el array accents
+        query = query.where(Video.accents.any(accent))
+    if topic:
+        query = query.where(Video.topics.any(topic))
+    if content_types:
+        query = query.where(Video.content_types.any(content_types))
 
-    # 6. Tipo (Busca dentro del array content_types)
-    # Nota: Tu base de datos guarda esto como array, así que usamos contains
-    if type:
-        query = query.where(Video.content_types.contains([type]))
-
-    # 7. LÓGICA DE VELOCIDAD (WPM)
-    # Convertimos "lento/normal/rápido" a rangos numéricos
-    if speed == 'slow':
-        # Menos de 120 palabras por minuto
-        query = query.where(Video.wpm < 120)
-    elif speed == 'normal':
-        # Entre 120 y 160 wpm
-        query = query.where(and_(Video.wpm >= 120, Video.wpm <= 160))
-    elif speed == 'fast':
-        # Más de 160 wpm
-        query = query.where(Video.wpm > 160)
-
-    # Ordenar por fecha y paginar
-    query = query.order_by(Video.created_at.desc()).offset(skip).limit(limit)   
+    # Ordenar por fecha de creación descendente
+    query = query.order_by(Video.created_at.desc()).offset(skip).limit(limit)
+    
     result = await db.execute(query)
     return result.scalars().all()
 
 
-@router.get("/filters", response_model=dict)
-async def get_video_filters():
+@router.get("/filters")
+def get_filters():
     """
-    Lee los archivos JSON de configuración y devuelve las opciones disponibles
-    para llenar los selectores del Frontend.
+    Carga: Niveles.json, Etiquetas.json, Tipos.json y accents.json
+    Devuelve la estructura exacta para que el Frontend monte los selectores.
     """
-    # Calculamos la ruta absoluta a la carpeta Data
-    # routers/videos.py está en backend/routers, así que subimos uno (..) y entramos a Data
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data_dir = os.path.join(base_dir, "Data")
+    try:
+        base_path = "Data" # Asegúrate de que la carpeta se llame así
+        
+        def load_json(filename):
+            path = os.path.join(base_path, filename)
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            return []
 
-    def load_json(filename):
-        try:
-            with open(os.path.join(data_dir, filename), 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return [] # Si no existe, devuelve lista vacía para no romper el front
+        levels = load_json("Niveles.json")
+        topics = load_json("Etiquetas.json")
+        content_types = load_json("Tipos.json")
+        
+        # Cargar el archivo de acentos complejo que me mostraste
+        accents_data = load_json("accents.json") 
+        if not accents_data:
+            accents_data = {} # Fallback vacío si falla
 
-    return {
-        "levels": load_json("Niveles.json"),
-        "types": load_json("Tipos.json"),
-        "topics": load_json("Etiquetas.json"),
-        "languages": load_json("accents.json")
-    }
-
-@router.get("/{video_id}", response_model=VideoResponse,
-    dependencies=[Depends(RateLimiter(times=60, seconds=60))])
+        return {
+            "levels": levels,
+            "topics": topics,
+            "content_types": content_types,
+            "accents_data": accents_data # Enviamos el objeto completo (en, es, fr...)
+        }
+    except Exception as e:
+        print(f"❌ Error cargando filtros: {e}")
+        return {"levels": [], "topics": [], "content_types": [], "accents_data": {}}
+    
+    
+@router.get("/{video_id}", response_model=VideoResponse)
 async def read_video(video_id: str, db: AsyncSession = Depends(get_db)):
-    """
-    🔍 PÚBLICO: Ver detalle de un video.
-    """
     query = select(Video).where(Video.video_id == video_id)
     result = await db.execute(query)
     video = result.scalar_one_or_none()
-    if not video: raise HTTPException(status_code=404, detail="Video no encontrado")
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found")
     return video
 
 
@@ -191,20 +169,20 @@ async def create_videos_batch(videos: List[VideoCreate], db: AsyncSession = Depe
     return {"status": "success", "created": created, "ignored": ignored}
 
 
-@router.post("/", response_model=VideoResponse,
-    dependencies=[Depends(verify_admin_key)]) # <--- CANDADO 🔒
+# --- CREATE VIDEO (MANUAL) ---
+@router.post("/", response_model=VideoResponse)
 async def create_video(video: VideoCreate, db: AsyncSession = Depends(get_db)):
-    """
-    🔒 PRIVADO: Crear un video manual.
-    """
-    res = await db.execute(select(Video).where(Video.video_id == video.video_id))
-    if res.scalar_one_or_none(): raise HTTPException(400, "ID existente")
+    # Verificar si existe
+    query = select(Video).where(Video.video_id == video.video_id)
+    result = await db.execute(query)
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Video ID already exists")
+
     new_video = Video(**video.model_dump())
     db.add(new_video)
     await db.commit()
     await db.refresh(new_video)
     return new_video
-
 
 @router.patch("/{video_id}", response_model=VideoResponse,
     dependencies=[Depends(verify_admin_key)]) # <--- CANDADO 🔒

@@ -7,75 +7,52 @@ import random
 
 load_dotenv()
 
-# --- 1. GESTIÓN DE MÚLTIPLES CLAVES (ROTACIÓN) ---
-# Cargamos todas las claves y limpiamos espacios
+# --- GESTIÓN DE MÚLTIPLES CLAVES ---
 keys_string = os.getenv("GROQ_API_KEYS", "")
 API_KEYS = [k.strip() for k in keys_string.split(",") if k.strip()]
 
 if not API_KEYS:
     print("❌ ERROR: No se encontraron claves en GROQ_API_KEYS")
-    API_KEYS = ["dummy_key"] # Para evitar crash inmediato, fallará luego
+    API_KEYS = ["dummy_key"]
 
 async def get_groq_completion(messages, system_instruction, model="llama-3.1-8b-instant"):
-    """
-    Intenta realizar la petición rotando claves si encuentra un error 429.
-    """
-    # Intentamos con cada clave disponible
     for i, api_key in enumerate(API_KEYS):
         try:
-            # Instanciamos el cliente con la clave actual
             client = AsyncGroq(api_key=api_key)
-            
             chat_completion = await client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    # Si messages ya tiene estructura, úsala, si no, adáptalo
-                ],
+                messages=[{"role": "system", "content": system_instruction}],
                 model=model,
                 temperature=0.1,
                 response_format={"type": "json_object"}, 
                 max_completion_tokens=1500,
             )
             return chat_completion.choices[0].message.content
-
         except RateLimitError:
-            print(f"⚠️ Clave {i+1}/{len(API_KEYS)} agotada (429). Cambiando a la siguiente...")
-            continue # Salta a la siguiente clave en el bucle
-            
+            print(f"⚠️ Clave {i+1} agotada (429). Rotando...")
+            continue
         except Exception as e:
-            # Si el error contiene "429" en el mensaje (a veces Groq lo lanza como APIError genérico)
             if "429" in str(e):
-                print(f"⚠️ Clave {i+1}/{len(API_KEYS)} agotada (Error genérico 429). Rotando...")
+                print(f"⚠️ Clave {i+1} agotada (Error 429). Rotando...")
                 continue
-            
-            # Si es otro error, lo lanzamos
             print(f"❌ Error en cliente Groq (Clave {i+1}): {e}")
             raise e
-            
-    # Si salimos del bucle, es que todas fallaron
-    raise Exception("Rate limit reached on ALL available API keys.")
+    raise Exception("Rate limit reached on ALL keys.")
 
-# --- CARGA DE DATOS (Igual que antes) ---
 def load_constraints():
     try:
-        with open("Data/Etiquetas.json", "r", encoding="utf-8") as f:
-            tags_list = json.load(f)
-        with open("Data/Niveles.json", "r", encoding="utf-8") as f:
-            levels_list = json.load(f)
-        with open("Data/Tipos.json", "r", encoding="utf-8") as f: 
-            types_list = json.load(f)
-        return tags_list, levels_list, types_list
-    except FileNotFoundError:
-        return [], [], []
+        with open("Data/Etiquetas.json", "r", encoding="utf-8") as f: tags = json.load(f)
+        with open("Data/Niveles.json", "r", encoding="utf-8") as f: levels = json.load(f)
+        with open("Data/Tipos.json", "r", encoding="utf-8") as f: types = json.load(f)
+        return tags, levels, types
+    except: return [], [], []
 
-# --- EL PROMPT (Igual que antes) ---
 def GetPrompt(transcript_text, tags, levels, types):
     tags_str = ", ".join([f'"{t}"' for t in tags]) if tags else "Technology, Business"
     levels_str = ", ".join([f'"{l}"' for l in levels]) if levels else "B1, B2"
     types_str = ", ".join([f'"{t}"' for t in types]) if types else "General"
     
+    # --- JSON ESTRUCTURA SIMPLIFICADA (SIN summary NI functional_use) ---
     json_structure = {
-        "summary": "Concise summary in 2 lines (ENGLISH).",
         "transcript_summary": "Detailed summary (max 500 chars) (ENGLISH).",
         "level": "One value from list.",
         "topics": ["Tag1", "Tag2", "Tag3"],
@@ -83,8 +60,7 @@ def GetPrompt(transcript_text, tags, levels, types):
         "content_types": ["Type1"],
         "wpm_estimate": 150,
         "vocabulary": [{ "term": "Word", "definition": "Short definition in English." }],
-        "grammar_stats": { "subjunctive": "Low", "past_tense": "Medium", "future_tense": "Low", "connectors": "High" },
-        "functional_use": "E.g.: To learn business negotiation."
+        "grammar_stats": { "subjunctive": "Low", "past_tense": "Medium", "future_tense": "Low", "connectors": "High" }
     }
 
     prompt = f"""
@@ -105,21 +81,18 @@ def GetPrompt(transcript_text, tags, levels, types):
     """
     return prompt
 
-# --- GENERACIÓN PRINCIPAL ---
 async def generate_response(transcript_text) -> dict:
     try:
         tags, levels, types = load_constraints()
         system_instruction = GetPrompt(transcript_text, tags, levels, types)
         
-        # LLAMADA CON ROTACIÓN
         try:
             text_resp = await get_groq_completion([], system_instruction)
         except Exception as e:
             return {"error": f"Todas las claves fallaron: {str(e)}"}
         
         try:
-            parsed = json.loads(text_resp)
-            return parsed
+            return json.loads(text_resp)
         except json.JSONDecodeError:
             return {"error": "Failed to parse AI response"}
 

@@ -63,8 +63,7 @@ class VideoPipeline:
                     if sub_source_val not in [e.value for e in SubSourceEnum]:
                         sub_source_val = "none"
 
-                    # Listas para columnas ARRAY
-                    # Nota: La IA devuelve 'accents' y 'content_types', aseguramos que sean listas
+                    # Arrays
                     accents_list = final_data.get("accents", [])
                     if isinstance(accents_list, str): accents_list = [accents_list]
                     
@@ -74,13 +73,11 @@ class VideoPipeline:
                     topics_list = final_data.get("topics", [])
 
                     # 2. Construcción del JSON LIMPIO (ai_analysis)
-                    # Aquí seleccionamos SOLO lo que queremos en el JSON, sin repetir lo de arriba
+                    # --- CAMBIO AQUÍ: Eliminados 'summary' y 'functional_use' ---
                     ai_clean_json = {
-                        "summary": final_data.get("summary"),
                         "transcript_summary": final_data.get("transcript_summary"),
                         "vocabulary": final_data.get("vocabulary", []),
                         "grammar_stats": final_data.get("grammar_stats", {}),
-                        "functional_use": final_data.get("functional_use"),
                         "wpm_estimate": final_data.get("wpm_estimate")
                     }
 
@@ -90,7 +87,7 @@ class VideoPipeline:
                         title=final_data["title"],
                         url=final_data["url"],
                         channel_name=final_data["channel"],                        
-                        # --- COLUMNAS SQL (Para filtros rápidos) ---
+                        # --- COLUMNAS SQL ---
                         topics=topics_list,
                         accents=accents_list,
                         content_types=types_list,
@@ -100,10 +97,10 @@ class VideoPipeline:
                         language=final_data.get("language", "en"), 
                         
                         # --- DATOS DE TEXTO ---
-                        transcript=final_data.get("transcript_full", ""),
+                        transcript=None, # No guardamos texto plano para ahorrar espacio
                         transcript_json=final_data.get("transcript_json", []),
                         
-                        # --- COLUMNA JSON (Solo contenido rico, SIN duplicados) ---
+                        # --- COLUMNA JSON ---
                         ai_analysis=ai_clean_json
                     )
 
@@ -112,7 +109,8 @@ class VideoPipeline:
                 
                 except Exception as e:
                     print(f"❌ Error guardando SQL {final_data.get('video_id')}: {e}")
-                    await session.rollback()                        
+                    await session.rollback()
+                    
     async def process_single_video(self, url: str):
         """Orquesta: Extracción -> IA (con contexto de país) -> Guardado"""
         try:
